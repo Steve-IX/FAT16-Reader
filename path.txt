@@ -1,0 +1,2 @@
+const * char = "directory 1 or 2"
+const * char = "fat16 (1).img

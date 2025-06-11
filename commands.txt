@@ -1,0 +1,2 @@
+gcc -o fat fat.c <--- compile 
+./fat   <-- run
