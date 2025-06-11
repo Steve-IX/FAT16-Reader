@@ -1,108 +1,92 @@
-# FAT16 Reader — A Minimal, Self-Contained Filesystem Inspector for C
+# FAT16-Explorer – Minimal Filesystem Inspector in ISO C
 
-`fat16-reader` is a small C codebase that **opens a raw FAT16 disk image, decodes its on-disk data structures, and lets you navigate files and directories from user space**.
-The goal is to demonstrate low-level filesystem handling with nothing more than the POSIX API, standard C, and a few hundred lines of code.&#x20;
-
----
-
-## Features
-
-| Capability              | Detail                                                                                                                                        |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| Boot-sector parsing     | Reads the BIOS Parameter Block (BPB) to discover sector size, cluster size, FAT count, root-directory size, and total sectors.                |
-| FAT caching & traversal | Loads an entire File Allocation Table into memory and follows cluster chains until the end-of-file marker (`0xFFF8…0xFFFF`).                  |
-| Root-directory listing  | Decodes 8.3 filenames, attributes (ADVSHR), timestamps, file size, and starting cluster; prints a neatly aligned table.                       |
-| Long-filename support   | Collects the Unicode “long directory entries” that precede a short entry, reconstructing full names transparently.                            |
-| Random access file IO   | `openFile / readFile / seekFile / closeFile` mimic the POSIX semantics while enforcing file length, cluster boundaries, and read-only rules.  |
-| Path resolution         | Walks arbitrary paths such as `/music/90s/hybrid-theory/01-papercut.flac`, mixing long and short names as needed.                             |
+FAT16-Explorer is a self-contained study of the FAT16 disk format implemented in portable C 11.
+It opens an uncompressed disk image, decodes every on-disk structure, and lets you walk directories, follow cluster chains, and read files without relying on any external libraries or FUSE bindings.
 
 ---
 
-## Directory layout
+## Why this exists
+
+* **Hands-on learning.** All code paths map 1-to-1 to the fields described in the FAT specification.
+* **Small surface.** Fewer than 1 000 effective lines; easy to step through in a debugger.
+* **Progressive layers.** Each source file adds exactly one capability, so you can follow the evolution from a single‐sector hex dump to a fully navigable filesystem.
+
+---
+
+## Project layout
 
 ```
-.
-├─ src/
-│  ├─ fat16.h            # public data structures & prototypes
-│  ├─ fat16_core.c       # sector I/O, BPB parsing, FAT loading
-│  ├─ fat16_dir.c        # root & sub-directory decoding
-│  ├─ fat16_file.c       # open/read/seek/close implementation
-│  └─ main.c             # CLI: ls, cat, hex-dump
-├─ include/
-│  └─ boot_sector.h      # packed structs copied from spec
-├─ img/                  # sample disk images for testing
-├─ Makefile
-└─ README.md
+Operating-Systemss/
+├── fat.c          # step 1: read an arbitrary sector
+├── fat2.c         # step 2: parse the BIOS Parameter Block (boot sector)
+├── fat3.c         # step 3: load a complete FAT and follow cluster chains
+├── fat4.c         # step 4: list the root directory with timestamps & attributes
+├── fat5.c         # step 5: read-only POSIX-like API (open/read/seek/close)
+├── fat6.c         # step 6: reconstruct long file names (VFAT entries)
+├── fat7.c         # step 7: resolve nested paths
+├── final.c        # consolidated demo combining every feature above
+├── fat16.img      # sample 32 MB image (MS-DOS formatted)
+├── Makefile       # convenience targets for GCC or Clang
+└── docs/          # packed structs and offset cheat-sheets
 ```
-
-All sources are pure C11; there are **no external dependencies and no third-party libraries**.&#x20;
 
 ---
 
 ## Building
 
 ```bash
-# GCC example
-make                # produces ./fat16
-
-# remove objects & binary
-make clean
+# quickest route – compile the full demo
+gcc -std=c11 -Wall -Wextra -pedantic -o fat16 final.c
+# or build individual stages
+gcc -o fat4 fat4.c
 ```
 
-The default `Makefile` compiles everything in `src/` and names the output binary after the directory. Adjust `CC` or `CFLAGS` as required.&#x20;
+The code is strictly POSIX; it builds on Linux, macOS, and the \*BSDs with the system compiler.
 
 ---
 
-## Usage
+## Running the demo
 
-### List the root directory
-
-```bash
-./fat16 ls img/dos_32MB.img
-```
-
-```
-Start  Date       Time     Attr  Size      Name
------  ---------- -------- ----- --------- -----------------
-0002   2023-06-01 14:07:18 A----    16384  COMMAND.COM
-0010   2023-06-01 14:07:18 AD---        0  GAMES
-...
-```
-
-### View a file in hex
+`final.c` is wired to the bundled `fat16.img` by default:
 
 ```bash
-./fat16 hd img/dos_32MB.img /CONFIG.SYS | head
+./fat16
 ```
 
-```
-00000000  23 20 43 6F 6E 66 69 67  20 66 69 6C 65 0D 0A 64  |# Config file..d|
-...
-```
+It prints
 
-### Dump an entire file
+* Boot-sector/BPB fields (bytes-per-sector, sectors-per-cluster, number-of-FATs, etc.).
+* A neatly aligned root-directory listing that mixes 8 .3 and long file names.
+* The full cluster chain for every regular file.
+* A hexdump of the first data cluster of each file.
+
+To inspect a different image, change the `const char *filePath` at the top of `final.c` or pass your own path when compiling:
 
 ```bash
-./fat16 cat img/dos_32MB.img "/Documents/notes/meeting.txt"
+gcc -DBOOT_IMAGE=\"~/images/msdos.img\" -o fat16 final.c
 ```
 
 ---
 
-## Design notes
+## Inside the code
 
-* **Single I/O abstraction** – all disk access funnels through `read_sector(fd, sector_no, buf)`, isolating lseek/read details.&#x20;
-* **Packed structs** mirror on-disk layouts exactly; `__attribute__((packed))` prevents compiler padding.&#x20;
-* **Sector & cluster math** derives every offset from BPB fields, so the code runs against *any* valid FAT16 image (different sector sizes, cluster counts, hidden sectors, etc.).&#x20;
-* **Stateless reads** – `readFile` computes the required cluster on the fly from the current file offset; no hidden caches beyond the FAT copy.
-* **Consistent error handling** – every public function returns `-1` on failure and sets `errno`, matching POSIX conventions.
+| Layer           | Key idea                                                                                                                                   | Where to look                            |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------- |
+| Sector I/O      | *Single abstraction* `read_sector(fd, n, buf)` hides `lseek`-plus-`read`.                                                                  | `fat.c`, `fat2.c`                        |
+| Metadata        | Packed C structs mirror the BPB, directory entries, and long-name records byte-for-byte.                                                   | `fat2.c`, `fat4.c`, `docs/boot_sector.h` |
+| FAT traversal   | The cluster number read from a directory entry is chased through the in-memory FAT until an end-of-file marker (0xFFF8–0xFFFF) is reached. | `fat3.c`                                 |
+| Read-only API   | `openFile`, `readFile`, `seekFile`, `closeFile` enforce cluster boundaries and file length while presenting familiar POSIX semantics.      | `fat5.c`                                 |
+| Long file names | Consecutive VFAT entries are re-assembled into UTF-16, converted to wchar-t, then matched against user paths.                              | `fat6.c`, `fat7.c`                       |
+
+Every public function returns `-1` on error and sets `errno`, so callers can integrate the code into larger projects without surprises.
 
 ---
 
-## Extending the project
+## Extending the tool
 
-* **Multiple open files** – track independent file offsets in a linked list or table.
-* **Write support** – update FAT entries, directory timestamps, and maintain mirrored FAT copies safely.
-* **Mount helper** – expose the image to FUSE for transparent access from the host OS.
-* **Unit tests** – feed crafted images into a harness with Test-Driven Development, covering edge cases like fragmented files, deleted entries, and boundary values.
+* **Multiple concurrent files** – store per-file state in a linked list instead of a single global pointer.
+* **Write support** – allocate free clusters, update both FAT copies, and patch directory timestamps.
+* **FUSE front-end** – expose the reader through a FUSE mountpoint for transparent browsing from the host OS.
+* **Automated tests** – craft edge-case images (fragmented files, deleted entries, non-standard BPB values) and validate behaviour under CI.
 
 ---
